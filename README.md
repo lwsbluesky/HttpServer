@@ -25,10 +25,12 @@ python app.py
 
 双击 `build_exe.bat`，生成 `dist\HttpServer.exe`。将 EXE 放在希望存放共享目录的位置，首次运行会自动创建 `共享文件` 与 `data`。可通过 `PORT=8080` 修改端口。
 
-#使用：
+##使用：
+
   python app.py或者直接运行EXE文件。
 
 ## 功能介绍：
+
 <img width="1113" height="626" alt="ce85de9ebd154ae78f0cbec7961528b4" src="https://github.com/user-attachments/assets/e2dc9451-b37f-45a5-9010-e319172a6a5d" />
 http http://localhost:8000访问,用admin进入登录。
 <img width="1105" height="800" alt="FF70E7C1-E774-4700-A6E9-1A5A457FFDBF" src="https://github.com/user-attachments/assets/a9e1f2fa-d80a-4b44-ada7-874b382b2ce1" />
