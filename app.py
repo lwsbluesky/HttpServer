@@ -8,7 +8,9 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import threading
 import zipfile
+from starlette.background import BackgroundTask
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -42,6 +44,7 @@ STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 SESSIONS: dict[str, dict] = {}
+SEARCH_CACHE: dict[str, list[tuple[str, str, float]]] = {}
 TEXT_EXTENSIONS = {".txt", ".log", ".md", ".json", ".xml", ".csv", ".tsv", ".ini", ".cfg", ".conf", ".yaml", ".yml", ".html", ".htm", ".css", ".js", ".ts", ".py", ".java", ".c", ".cpp", ".h", ".hpp", ".sql", ".rtf", ".properties", ".sh", ".bat", ".ps1", ".toml"}
 VIEW_EXTENSIONS = TEXT_EXTENSIONS | {".pdf"}
 
@@ -60,13 +63,12 @@ def init_db():
     CREATE TABLE IF NOT EXISTS share_roots (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, path TEXT UNIQUE NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """)
-    root = str(EXE_DIR)
-    row = c.execute("SELECT id FROM share_roots WHERE id=1").fetchone()
-    if row:
-        c.execute("UPDATE share_roots SET name=?, path=? WHERE id=1", ("程序目录", root))
-    else:
-        c.execute("INSERT INTO share_roots(id,name,path) VALUES(1,?,?)", ("程序目录", root))
+    # One-time migration: remove the legacy automatic program directory.
+    if not c.execute("SELECT 1 FROM settings WHERE key='removed_program_root'").fetchone():
+        c.execute("DELETE FROM share_roots WHERE name='程序目录'")
+        c.execute("INSERT INTO settings(key,value) VALUES('removed_program_root','1')")
     if not c.execute("SELECT 1 FROM users WHERE username='admin'").fetchone():
         c.execute("INSERT INTO users(username,password,role) VALUES('admin','admin123','admin')")
     if not c.execute("SELECT 1 FROM users WHERE username='guest'").fetchone():
@@ -121,6 +123,32 @@ def item_info(path: Path, root_id: int):
     vp = virtual_path(root_id, path)
     return {"name": path.name, "path": vp, "type": "folder" if path.is_dir() else "file", "size": 0 if path.is_dir() else stat.st_size, "modified": stat.st_mtime, "extension": path.suffix.lower(), "can_view": path.is_file() and path.suffix.lower() in VIEW_EXTENSIONS, "hidden": vp in hidden_paths()}
 
+def search_entries(entry: dict) -> list[tuple[str, str, float]]:
+    """Cache lightweight searchable metadata instead of walking disks on every request."""
+    cache_key = f"{entry['id']}:{entry['path']}"
+    if cache_key in SEARCH_CACHE:
+        return SEARCH_CACHE[cache_key]
+    result = []
+    root = Path(entry["path"])
+    if root.exists():
+        for parent, _, names in os.walk(root):
+            parent_path = Path(parent)
+            for name in names:
+                try:
+                    p = parent_path / name
+                    result.append((name.lower(), virtual_path(entry["id"], p), p.stat().st_mtime))
+                except OSError:
+                    continue
+    SEARCH_CACHE[cache_key] = result
+    return result
+
+def invalidate_search_cache():
+    SEARCH_CACHE.clear()
+
+def remove_temp_file(path: str):
+    try: Path(path).unlink(missing_ok=True)
+    except OSError: pass
+
 class Login(BaseModel):
     username: str
     password: str
@@ -137,6 +165,8 @@ class RootInput(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 @app.get("/login", response_class=HTMLResponse)
 @app.get("/admin/", response_class=HTMLResponse)
+@app.get("/files", response_class=HTMLResponse)
+@app.get("/manageCenter", response_class=HTMLResponse)
 def index(): 
     index_file = STATIC_DIR / "index.html"
     if not index_file.exists():
@@ -158,22 +188,24 @@ def files(request: Request, path: str = "", q: str = ""):
     if q:
         pattern = q.lower(); result = []
         for entry in roots():
-            if entry["id"] == 1:
-                continue
-            rp = Path(entry["path"])
-            if not rp.exists(): continue
-            for child in rp.rglob("*"):
-                if not child.is_file(): continue
-                ok = fnmatch.fnmatch(child.name.lower(), pattern) if any(x in pattern for x in "*?") else pattern in child.name.lower()
+            for name, vp, modified in search_entries(entry):
+                ok = fnmatch.fnmatch(name, pattern) if any(x in pattern for x in "*?") else pattern in name
                 if ok:
-                    item = item_info(child, entry["id"])
+                    p, rid, _ = resolve_path(vp)
+                    item = item_info(p, rid)
                     if u["role"] == "admin" or item["path"] not in hidden: result.append(item)
         return {"path": "", "items": result, "search": True}
     if not path:
+        shared = roots()
+        if not shared:
+            return {"path": "", "items": [], "search": False}
+        if len(shared) == 1:
+            p = Path(shared[0]["path"])
+            items = [item_info(x, shared[0]["id"]) for x in p.iterdir() if not x.name.startswith(".")]
+            if u["role"] != "admin": items = [x for x in items if x["path"] not in hidden]
+            return {"path": f"r/{shared[0]['id']}", "items": sorted(items, key=lambda x: (x["type"] != "folder", x["name"].lower())), "search": False}
         result = []
-        for entry in roots():
-            if entry["id"] == 1:
-                continue
+        for entry in shared:
             p = Path(entry["path"])
             vp = f"r/{entry['id']}"
             is_hidden = vp in hidden
@@ -207,7 +239,7 @@ def download(request: Request, path: str):
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as z:
         for child in p.rglob("*"):
             if child.is_file() and not child.name.startswith("."): z.write(child, child.relative_to(p.parent))
-    return FileResponse(tmp.name, media_type="application/zip", filename=f"{p.name}.zip")
+    return FileResponse(tmp.name, media_type="application/zip", filename=f"{p.name}.zip", background=BackgroundTask(remove_temp_file, tmp.name))
 
 @app.post("/api/files/hidden")
 def toggle_hidden(request: Request, path: str):
@@ -252,13 +284,30 @@ def get_roots(request: Request):
     if current_user(request)["role"] != "admin": raise HTTPException(403, "管理员权限")
     return roots()
 
+@app.post("/api/admin/share-roots/browse")
+def browse_root(request: Request):
+    """Choose a shared directory on the Windows machine running HttpServer."""
+    if current_user(request)["role"] != "admin": raise HTTPException(403, "管理员权限")
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        dialog = tk.Tk()
+        dialog.withdraw()
+        dialog.attributes("-topmost", True)
+        chosen = filedialog.askdirectory(parent=dialog, title="选择要共享的文件夹", mustexist=True)
+        dialog.destroy()
+        return {"path": chosen}
+    except Exception as exc:
+        raise HTTPException(500, f"无法打开目录选择框：{exc}")
+
 @app.post("/api/admin/share-roots")
 def add_root(request: Request, data: RootInput):
     if current_user(request)["role"] != "admin": raise HTTPException(403, "管理员权限")
+    if not data.path.strip(): raise HTTPException(400, "目录为空，添加失败")
     p = Path(data.path).expanduser().resolve()
     if not p.is_dir(): raise HTTPException(400, "目录不存在或不是文件夹")
     c = db()
-    try: c.execute("INSERT INTO share_roots(name,path) VALUES(?,?)", (data.name.strip() or p.name or str(p), str(p))); c.commit()
+    try: c.execute("INSERT INTO share_roots(name,path) VALUES(?,?)", (data.name.strip() or p.name or str(p), str(p))); c.commit(); invalidate_search_cache()
     except sqlite3.IntegrityError: raise HTTPException(400, "该目录已共享")
     finally: c.close()
     return {"ok": True}
@@ -268,13 +317,12 @@ def update_root(request: Request, root_id: int, data: RootInput):
     if current_user(request)["role"] != "admin": raise HTTPException(403, "管理员权限")
     p = Path(data.path).expanduser().resolve()
     if not p.is_dir(): raise HTTPException(400, "目录不存在或不是文件夹")
-    c = db(); c.execute("UPDATE share_roots SET name=?,path=? WHERE id=?", (data.name.strip() or p.name or str(p), str(p), root_id)); c.commit(); c.close(); return {"ok": True}
+    c = db(); c.execute("UPDATE share_roots SET name=?,path=? WHERE id=?", (data.name.strip() or p.name or str(p), str(p), root_id)); c.commit(); c.close(); invalidate_search_cache(); return {"ok": True}
 
 @app.delete("/api/admin/share-roots/{root_id}")
 def remove_root(request: Request, root_id: int):
     if current_user(request)["role"] != "admin": raise HTTPException(403, "管理员权限")
-    if root_id == 1: raise HTTPException(400, "程序目录不能移除")
-    c = db(); c.execute("DELETE FROM share_roots WHERE id=?", (root_id,)); c.commit(); c.close(); return {"ok": True}
+    c = db(); c.execute("DELETE FROM share_roots WHERE id=?", (root_id,)); c.commit(); c.close(); invalidate_search_cache(); return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn
@@ -298,7 +346,18 @@ if __name__ == "__main__":
     admin = c.execute("SELECT password FROM users WHERE username='admin'").fetchone()
     c.close()
 
-    print(f"INFO: account:admin password: {admin['password'] if admin else 'not found'}", flush=True)
-    print(f"INFO: Uvicorn running on http://{host}:{port} (Press CTRL+C to quit)", flush=True)
+    password = admin["password"] if admin else "not found"
+    startup_message = f"HttpServer 已启动\n\n访问地址： http://{host}:{port}\n管理员账号： admin\n管理员密码： {password}\n\n关闭此提示不会停止服务。"
+    if getattr(sys, "frozen", False):
+        # -w 后没有控制台，因此用独立线程显示运行信息，不阻塞 HTTP 服务。
+        def show_startup_message():
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(None, startup_message, "HttpServer", 0x40)
+            except Exception:
+                pass
+        threading.Thread(target=show_startup_message, daemon=True).start()
+    else:
+        print(f"INFO: account:admin， password: {password}", flush=True)
 
     uvicorn.run(app, host=host, port=port)
