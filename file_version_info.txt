@@ -1,0 +1,38 @@
+# UTF-8
+#
+# 对于下面的 StringTable 和 Translation 的值：
+# 0804 代表简体中文，04b0 代表 Unicode。十进制的 2052 等于十六进制的 0804。
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    # filevers 和 prodvers 必须是包含四个数字的元组：(主版本, 次版本, 修订号, 编译号)
+    filevers=(1, 0, 0, 0),  # <--- 这里修改文件版本号 (内部识别)
+    prodvers=(1, 0, 0, 0),  # <--- 这里修改产品版本号 (内部识别)
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+    ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        u'080404b0',
+        [
+        # =======================================================
+        # 下面是你能在“右键 -> 属性 -> 详细信息”中看到的文本内容
+        # =======================================================
+        StringStruct(u'CompanyName', u'HttpServer_AndyLiu'),                 # <--- 公司名称/创建人
+        StringStruct(u'FileDescription', u'HttpServer工具'),   # <--- 文件描述
+        StringStruct(u'FileVersion', u'1.1.0.0'),                 # <--- 文件版本 (显示用)
+        StringStruct(u'InternalName', u'HttpServer'),          # <--- 内部名称
+        StringStruct(u'LegalCopyright', u'Copyright XiaYing (c) 2026'),   # <--- 版权信息
+        StringStruct(u'OriginalFilename', u'HttpServer.exe'),     # <--- 原始文件名
+        StringStruct(u'ProductName', u'OTS工具集'),            # <--- 产品名称
+        StringStruct(u'ProductVersion', u'1.1.0.0')               # <--- 产品版本 (显示用)
+        ])
+      ]), 
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)
