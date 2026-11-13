@@ -5,8 +5,8 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
     # filevers 和 prodvers 必须是包含四个数字的元组：(主版本, 次版本, 修订号, 编译号)
-    filevers=(1, 0, 0, 0),  # <--- 这里修改文件版本号 (内部识别)
-    prodvers=(1, 0, 0, 0),  # <--- 这里修改产品版本号 (内部识别)
+    filevers=(1, 2, 1, 1),  # <--- 这里修改文件版本号 (内部识别)
+    prodvers=(1, 2, 1, 1),  # <--- 这里修改产品版本号 (内部识别)
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -25,12 +25,12 @@ VSVersionInfo(
         # =======================================================
         StringStruct(u'CompanyName', u'HttpServer_AndyLiu'),                 # <--- 公司名称/创建人
         StringStruct(u'FileDescription', u'HttpServer工具'),   # <--- 文件描述
-        StringStruct(u'FileVersion', u'1.1.0.0'),                 # <--- 文件版本 (显示用)
+        StringStruct(u'FileVersion', u'1.2.1.1'),                 # <--- 文件版本 (显示用)
         StringStruct(u'InternalName', u'HttpServer'),          # <--- 内部名称
         StringStruct(u'LegalCopyright', u'Copyright XiaYing (c) 2026'),   # <--- 版权信息
         StringStruct(u'OriginalFilename', u'HttpServer.exe'),     # <--- 原始文件名
         StringStruct(u'ProductName', u'OTS工具集'),            # <--- 产品名称
-        StringStruct(u'ProductVersion', u'1.1.0.0')               # <--- 产品版本 (显示用)
+        StringStruct(u'ProductVersion', u'1.2.1.1')               # <--- 产品版本 (显示用)
         ])
       ]), 
     VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
