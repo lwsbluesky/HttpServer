@@ -10,9 +10,11 @@ import sys
 import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from starlette.background import BackgroundTask
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -45,14 +47,21 @@ STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 SESSIONS: dict[str, dict] = {}
+SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+MAX_SESSIONS = 4096
+SESSION_LOCK = threading.Lock()
 # 搜索索引只做非常短的缓存；共享目录内容可能随时变化，不能永久复用。
 SEARCH_CACHE: dict[str, tuple[float, list[tuple[str, str, float]]]] = {}
 SEARCH_CACHE_TTL_SECONDS = 1.0
+SEARCH_CACHE_MAX_ENTRIES = 32
+SEARCH_CACHE_LOCK = threading.Lock()
 TEXT_EXTENSIONS = {".txt", ".log", ".md", ".json", ".xml", ".csv", ".tsv", ".ini", ".cfg", ".conf", ".yaml", ".yml", ".html", ".htm", ".css", ".js", ".ts", ".py", ".java", ".c", ".cpp", ".h", ".hpp", ".sql", ".rtf", ".properties", ".sh", ".bat", ".ps1", ".toml"}
-VIEW_EXTENSIONS = TEXT_EXTENSIONS | {".pdf"}
+OFFICE_TEXT_EXTENSIONS = {".docx", ".xlsx", ".pptx"}
+LEGACY_OFFICE_EXTENSIONS = {".doc", ".xls", ".ppt"}
+VIEW_EXTENSIONS = TEXT_EXTENSIONS | {".pdf"} | OFFICE_TEXT_EXTENSIONS | LEGACY_OFFICE_EXTENSIONS
 
 def db():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=10)
     c.row_factory = sqlite3.Row
     return c
 
@@ -117,9 +126,14 @@ def save_hidden(values):
 
 def current_user(request: Request):
     token = request.headers.get("Authorization", "").removeprefix("Bearer ") or request.query_params.get("token", "")
-    u = SESSIONS.get(token)
-    if not u: raise HTTPException(401, "请先登录")
-    return u
+    now = time.monotonic()
+    with SESSION_LOCK:
+        session = SESSIONS.get(token)
+        if not session or session["expires_at"] <= now:
+            SESSIONS.pop(token, None)
+            raise HTTPException(401, "请先登录")
+        session["expires_at"] = now + SESSION_TTL_SECONDS
+        return session["user"]
 
 def item_info(path: Path, root_id: int):
     stat = path.stat()
@@ -129,10 +143,11 @@ def item_info(path: Path, root_id: int):
 def search_entries(entry: dict) -> list[tuple[str, str, float]]:
     """Build a short-lived index so files created after startup become searchable."""
     cache_key = f"{entry['id']}:{entry['path']}"
-    cached = SEARCH_CACHE.get(cache_key)
     now = time.monotonic()
-    if cached and now - cached[0] < SEARCH_CACHE_TTL_SECONDS:
-        return cached[1]
+    with SEARCH_CACHE_LOCK:
+        cached = SEARCH_CACHE.get(cache_key)
+        if cached and now - cached[0] < SEARCH_CACHE_TTL_SECONDS:
+            return cached[1]
     result = []
     root = Path(entry["path"])
     if root.exists():
@@ -144,15 +159,119 @@ def search_entries(entry: dict) -> list[tuple[str, str, float]]:
                     result.append((name.lower(), virtual_path(entry["id"], p), p.stat().st_mtime))
                 except OSError:
                     continue
-    SEARCH_CACHE[cache_key] = (now, result)
+    with SEARCH_CACHE_LOCK:
+        SEARCH_CACHE[cache_key] = (now, result)
+        expired = [key for key, (created, _) in SEARCH_CACHE.items() if now - created >= SEARCH_CACHE_TTL_SECONDS]
+        for key in expired:
+            SEARCH_CACHE.pop(key, None)
+        if len(SEARCH_CACHE) > SEARCH_CACHE_MAX_ENTRIES:
+            oldest = sorted(SEARCH_CACHE, key=lambda key: SEARCH_CACHE[key][0])
+            for key in oldest[:len(SEARCH_CACHE) - SEARCH_CACHE_MAX_ENTRIES]:
+                SEARCH_CACHE.pop(key, None)
     return result
 
 def invalidate_search_cache():
-    SEARCH_CACHE.clear()
+    with SEARCH_CACHE_LOCK:
+        SEARCH_CACHE.clear()
 
 def remove_temp_file(path: str):
     try: Path(path).unlink(missing_ok=True)
     except OSError: pass
+
+def xml_text_nodes(data: bytes) -> list[str]:
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return []
+    values: list[str] = []
+    for node in root.iter():
+        if node.text and node.text.strip():
+            values.append(node.text.strip())
+    return values
+
+def docx_preview(path: Path) -> str:
+    with zipfile.ZipFile(path) as z:
+        paragraphs = []
+        try:
+            root = ET.fromstring(z.read("word/document.xml"))
+        except (KeyError, ET.ParseError):
+            return ""
+        for para in root.iter():
+            if para.tag.endswith("}p"):
+                text = "".join(t.text or "" for t in para.iter() if t.tag.endswith("}t"))
+                if text.strip():
+                    paragraphs.append(text.strip())
+        return "\n".join(paragraphs)
+
+def pptx_preview(path: Path) -> str:
+    with zipfile.ZipFile(path) as z:
+        slide_names = sorted(name for name in z.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml"))
+        slides = []
+        for index, name in enumerate(slide_names, 1):
+            text = "\n".join(xml_text_nodes(z.read(name)))
+            if text.strip():
+                slides.append(f"Slide {index}\n{text}")
+        return "\n\n".join(slides)
+
+def xlsx_preview(path: Path) -> str:
+    with zipfile.ZipFile(path) as z:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            try:
+                root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+                for item in root.iter():
+                    if item.tag.endswith("}si"):
+                        shared.append("".join(t.text or "" for t in item.iter() if t.tag.endswith("}t")))
+            except ET.ParseError:
+                shared = []
+        sheet_names = sorted(name for name in z.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"))
+        output = []
+        for index, name in enumerate(sheet_names, 1):
+            try:
+                root = ET.fromstring(z.read(name))
+            except ET.ParseError:
+                continue
+            rows = []
+            for row in root.iter():
+                if not row.tag.endswith("}row"):
+                    continue
+                cells = []
+                for cell in row:
+                    if not cell.tag.endswith("}c"):
+                        continue
+                    cell_type = cell.attrib.get("t")
+                    value = ""
+                    value_node = next((x for x in cell if x.tag.endswith("}v")), None)
+                    if value_node is not None and value_node.text is not None:
+                        value = value_node.text
+                    elif cell_type == "inlineStr":
+                        value = "".join(t.text or "" for t in cell.iter() if t.tag.endswith("}t"))
+                    if cell_type == "s":
+                        try:
+                            value = shared[int(value)]
+                        except (ValueError, IndexError):
+                            pass
+                    cells.append(value)
+                if any(cells):
+                    rows.append("\t".join(cells))
+            if rows:
+                output.append(f"Sheet {index}\n" + "\n".join(rows))
+        return "\n\n".join(output)
+
+def office_preview(path: Path) -> str:
+    ext = path.suffix.lower()
+    try:
+        if ext == ".docx":
+            content = docx_preview(path)
+        elif ext == ".xlsx":
+            content = xlsx_preview(path)
+        elif ext == ".pptx":
+            content = pptx_preview(path)
+        else:
+            return "该旧版 Office 二进制格式暂不支持直接解析预览，请转换为 .docx、.xlsx 或 .pptx 后在线浏览；当前文件仍可下载。"
+    except (OSError, zipfile.BadZipFile, KeyError):
+        content = ""
+    return content or "未能从该 Office 文件中提取到可预览的文本内容，当前文件仍可下载。"
 
 class Login(BaseModel):
     username: str
@@ -182,7 +301,16 @@ def index():
 def login(data: Login):
     c = db(); row = c.execute("SELECT * FROM users WHERE username=? AND password=?", (data.username, data.password)).fetchone(); c.close()
     if not row: raise HTTPException(401, "账号或密码错误")
-    token = secrets.token_urlsafe(24); SESSIONS[token] = dict(row)
+    now = time.monotonic()
+    token = secrets.token_urlsafe(24)
+    with SESSION_LOCK:
+        for old_token, session in list(SESSIONS.items()):
+            if session["expires_at"] <= now:
+                SESSIONS.pop(old_token, None)
+        while len(SESSIONS) >= MAX_SESSIONS:
+            oldest = min(SESSIONS, key=lambda key: SESSIONS[key]["expires_at"])
+            SESSIONS.pop(oldest, None)
+        SESSIONS[token] = {"user": dict(row), "expires_at": now + SESSION_TTL_SECONDS}
     return {"token": token, "user": {"username": row["username"], "role": row["role"], "can_browse": bool(row["can_browse"]), "can_download": bool(row["can_download"])}}
 
 @app.get("/api/files")
@@ -241,9 +369,13 @@ def download(request: Request, path: str):
     if not p.exists(): raise HTTPException(404, "文件不存在")
     if p.is_file(): return FileResponse(p, filename=p.name)
     tmp = tempfile.NamedTemporaryFile(prefix="httpserver_", suffix=".zip", delete=False); tmp.close()
-    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as z:
-        for child in p.rglob("*"):
-            if child.is_file() and not child.name.startswith("."): z.write(child, child.relative_to(p.parent))
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as z:
+            for child in p.rglob("*"):
+                if child.is_file() and not child.name.startswith("."): z.write(child, child.relative_to(p.parent))
+    except Exception:
+        remove_temp_file(tmp.name)
+        raise
     return FileResponse(tmp.name, media_type="application/zip", filename=f"{p.name}.zip", background=BackgroundTask(remove_temp_file, tmp.name))
 
 @app.post("/api/files/hidden")
@@ -365,4 +497,4 @@ if __name__ == "__main__":
     else:
         print(f"INFO: account:admin， password: {password}", flush=True)
 
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, timeout_keep_alive=5)
