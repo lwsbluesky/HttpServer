@@ -1,0 +1,50 @@
+{
+  "requested_seconds": 30,
+  "browser_checks": [
+    "first_login_forced_password_change",
+    "password_change_and_relogin",
+    "apostrophe_unicode_filename_preview",
+    "offline_error_and_online_recovery",
+    "prepared_one_time_file_download",
+    "admin_dashboard_escaped_root_name",
+    "five_directory_permissions_visible",
+    "diagnostics_browser_download",
+    "mobile_390px",
+    "server_logout",
+    "guest_browse_download_and_admin_page_redirect"
+  ],
+  "process_checks": [
+    "two_real_128MiB_archives_plus_50_requests",
+    "old_token_rejected_after_process_restart",
+    "database_settings_persisted_after_restart"
+  ],
+  "browser_page_errors": [],
+  "concurrency": {
+    "requests": 50,
+    "max_seconds": 0.1766975000500679,
+    "ok": 41,
+    "busy": 9
+  },
+  "load": {
+    "actual_seconds": 30.17,
+    "rounds": 150,
+    "status_counts": {
+      "200": 600
+    },
+    "p95_seconds": 0.05383450002409518,
+    "max_seconds": 0.5540394999552518,
+    "baseline": {
+      "rss": 65425408,
+      "handles": 345,
+      "threads": 26
+    },
+    "final": {
+      "rss": 64114688,
+      "handles": 339,
+      "threads": 23
+    },
+    "max_rss": 65667072,
+    "temp_files_after": 0
+  },
+  "outcome": "passed"
+}

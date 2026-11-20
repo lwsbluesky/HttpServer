@@ -1,0 +1,37 @@
+{
+  "requested_seconds": 10,
+  "browser_checks": [],
+  "process_checks": [
+    "two_real_128MiB_archives_plus_50_requests",
+    "old_token_rejected_after_process_restart",
+    "database_settings_persisted_after_restart"
+  ],
+  "concurrency": {
+    "requests": 50,
+    "max_seconds": 0.20122279995121062,
+    "ok": 43,
+    "busy": 7
+  },
+  "load": {
+    "actual_seconds": 10.22,
+    "rounds": 52,
+    "status_counts": {
+      "200": 208
+    },
+    "p95_seconds": 0.05123550002463162,
+    "max_seconds": 0.1991594999562949,
+    "baseline": {
+      "rss": 68190208,
+      "handles": 385,
+      "threads": 26
+    },
+    "final": {
+      "rss": 65875968,
+      "handles": 384,
+      "threads": 26
+    },
+    "max_rss": 68235264,
+    "temp_files_after": 0
+  },
+  "outcome": "passed"
+}
